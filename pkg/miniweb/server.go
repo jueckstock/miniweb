@@ -4,20 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
-	"mime"
 	"net"
 	"net/http"
-	"os"
-	"path"
 
 	socks "github.com/armon/go-socks5"
 )
-
-// MiniwebHostname is the "magic" hostname which gives access to e.g., miniCA-root-cert download
-const MiniwebHostname = "mini.web"
 
 // Server encapsulates the inner state of a running miniweb server (ports, filesystem root, configurations, caches, etc.)
 type Server struct {
@@ -28,24 +21,16 @@ type Server struct {
 	host      net.IP                      // host is the IP address on which we are listening for HTTP[S] requests (used to resolve DNS requests via SOCKS)
 	root      http.FileSystem             // root is the HTTP server FileSystem anchored at the miniweb file root
 	certCache map[string]*tls.Certificate // certCache is the in-memory map of TLS certs to use for DNS names
+
+	// New internal state
+	tree contentTree // tree is the master tree of domains/doc-roots that we are serving
 }
 
 // Resolve a DNS name against the miniweb file tree
 func (ws *Server) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	log.Printf("resolving '%s' -> local proxy\n", name)
-	if name != MiniwebHostname {
-		dir, err := ws.root.Open(name)
-		if err != nil {
-			return ctx, nil, fmt.Errorf("NXDOMAIN")
-		}
-		defer dir.Close()
-		stat, err := dir.Stat()
-		if err != nil {
-			return ctx, nil, err
-		}
-		if !stat.IsDir() {
-			return ctx, nil, fmt.Errorf("invalid domain file type")
-		}
+	domain := ws.tree.domain(name)
+	if domain == nil {
+		return ctx, nil, fmt.Errorf("NXDOMAIN")
 	}
 	return ctx, ws.host, nil
 }
@@ -61,58 +46,28 @@ func (ws *Server) Rewrite(ctx context.Context, request *socks.Request) (context.
 	} else {
 		newDest.Port = ws.Config.HTTPPort
 	}
-	log.Printf("rewriting address '%s' -> '%s'\n", request.DestAddr, newDest)
 	return ctx, newDest
 }
 
 // ServeHTTP responses from the miniweb file tree and/or configuration settings
 func (ws *Server) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
-	log.Printf("request (Host: %s, Path: %s)", req.Host, req.URL.Path)
-
-	if req.Host == MiniwebHostname {
-		response := "hello, world!"
-		writer.Header().Set("Content-Type", "text/plain")
-		writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(response)))
-		_, err := writer.Write([]byte(response))
-		if err != nil {
-			log.Printf("error streaming %s/%s: %v", MiniwebHostname, req.URL.Path, err)
-		}
-		return
+	domain := ws.tree.domain(req.Host)
+	if domain == nil {
+		log.Panicf("how did we accept a request for NXDOMAIN '%s'??", req.Host)
 	}
 
-	reqPath := fmt.Sprintf("%s/%s", req.Host, req.URL.Path)
-	file, err := ws.root.Open(reqPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writer.WriteHeader(404)
-		} else {
-			writer.WriteHeader(500)
-			writer.Write([]byte(err.Error()))
-		}
-	} else {
-		defer file.Close()
-		mimeType := mime.TypeByExtension(path.Ext(req.URL.EscapedPath()))
-		log.Printf("got MIME type '%s' for path '%s'", mimeType, req.URL.EscapedPath())
-		writer.Header().Set("Content-Type", mimeType)
-
-		if info, err := file.Stat(); err != nil {
-			writer.WriteHeader(500)
-			writer.Write([]byte(err.Error()))
-		} else {
-			writer.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
-			_, err := io.Copy(writer, file)
-			if err != nil {
-				log.Printf("error streaming '%s': %v", reqPath, err)
-			}
-		}
+	handler := domain.handler(req)
+	if handler == nil {
+		log.Panicf("how are we missing a handler for '%s'??", req.URL.Path)
 	}
+
+	handler.ServeHTTP(writer, req)
 }
 
 // GetCert retrieves the TLS cert to use for a particular DNS name from the miniweb file tree/configuration
 func (ws *Server) GetCert(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	cert, ok := ws.certCache[info.ServerName]
 	if !ok {
-		log.Printf("get-certificate for server name '%s'", info.ServerName)
 		certFileName := fmt.Sprintf("%s/cert.pem", info.ServerName)
 		file, err := ws.root.Open(certFileName)
 		if err != nil {
@@ -159,11 +114,17 @@ type ServerConfig struct {
 
 // ListenAndServe creates/runs a miniweb server until an error interrupts it
 func ListenAndServe(config ServerConfig) error {
+	tree, err := newContentTree(config.DataRoot)
+	if err != nil {
+		return fmt.Errorf("ListenAndServe(...): %w", err)
+	}
+
 	ws := &Server{
 		Config:    config,
 		host:      net.IPv4(127, 0, 0, 1),
 		root:      http.Dir(config.DataRoot),
 		certCache: make(map[string]*tls.Certificate),
+		tree:      tree,
 	}
 
 	socksServer, err := socks.New(&socks.Config{
