@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 
 	socks "github.com/armon/go-socks5"
+	"github.com/jueckstock/miniweb/pkg/minica"
 )
 
 // Server encapsulates the inner state of a running miniweb server (ports, filesystem root, configurations, caches, etc.)
@@ -17,13 +18,13 @@ type Server struct {
 	// Public information
 	Config ServerConfig // Config is the initial configuration (ports, paths) used to initialize the server
 
-	// Internal state
-	host      net.IP                      // host is the IP address on which we are listening for HTTP[S] requests (used to resolve DNS requests via SOCKS)
-	root      http.FileSystem             // root is the HTTP server FileSystem anchored at the miniweb file root
-	certCache map[string]*tls.Certificate // certCache is the in-memory map of TLS certs to use for DNS names
-
-	// New internal state
+	// Core internal state
+	host net.IP      // host is the IP address on which we are listening for HTTP[S] requests (used to resolve DNS requests via SOCKS)
 	tree contentTree // tree is the master tree of domains/doc-roots that we are serving
+
+	// HTTPS/TLS supporting state
+	issuer    *minica.Issuer              // issuer is our internal toy CA for signing TLS certs (using a self-generated toy CA cert/key)
+	certCache map[string]*tls.Certificate // certCache is the in-memory map of TLS certs to use for DNS names
 }
 
 // Resolve a DNS name against the miniweb file tree
@@ -68,38 +69,13 @@ func (ws *Server) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 func (ws *Server) GetCert(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	cert, ok := ws.certCache[info.ServerName]
 	if !ok {
-		certFileName := fmt.Sprintf("%s/cert.pem", info.ServerName)
-		file, err := ws.root.Open(certFileName)
+		newCert, err := ws.issuer.Sign([]string{info.ServerName}, []string{ws.host.String()})
 		if err != nil {
-			log.Printf("unable to open cert file '%s': %v", certFileName, err)
+			log.Printf("unable to sign TLS cert for hostname '%s': %v", info.ServerName, err)
 			return nil, err
 		}
-		certBlob, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Printf("unable to fully read cert file '%s': %v", certFileName, err)
-			return nil, err
-		}
-		keyFileName := fmt.Sprintf("%s/key.pem", info.ServerName)
-		file, err = ws.root.Open(keyFileName)
-		if err != nil {
-			log.Printf("unable to open key file '%s': %v", keyFileName, err)
-			return nil, err
-		}
-		keyBlob, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Printf("unable to fully read key file '%s': %v", keyFileName, err)
-			return nil, err
-		}
-
-		newCert, err := tls.X509KeyPair(certBlob, keyBlob)
-		if err != nil {
-			log.Printf("failed to parse/load certificate and/or key data: %v", err)
-			return nil, err
-		}
-
-		cert = &newCert
+		cert = newCert
 		ws.certCache[info.ServerName] = cert
-
 	}
 	return cert, nil
 }
@@ -122,7 +98,6 @@ func ListenAndServe(config ServerConfig) error {
 	ws := &Server{
 		Config:    config,
 		host:      net.IPv4(127, 0, 0, 1),
-		root:      http.Dir(config.DataRoot),
 		certCache: make(map[string]*tls.Certificate),
 		tree:      tree,
 	}
@@ -143,6 +118,12 @@ func ListenAndServe(config ServerConfig) error {
 		}
 	}()
 	if config.HTTPSPort > 0 {
+		keyFileName := filepath.Join(config.DataRoot, "minica-key.pem")
+		certFileName := filepath.Join(config.DataRoot, "minica.pem")
+		ws.issuer, err = minica.GetIssuer(keyFileName, certFileName)
+		if err != nil {
+			log.Panicf("error initializing miniCA (required for HTTPS server support): %v", err)
+		}
 		go func() {
 			log.Printf("HTTPS: listening on %s:%d, serving from %s\n", ws.host, config.HTTPSPort, config.DataRoot)
 			srv := &http.Server{
