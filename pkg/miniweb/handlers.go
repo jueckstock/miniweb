@@ -16,6 +16,7 @@ var handlerFactoryRegistry = map[string]handlerFactoryFunc{
 	"status":    newStatusHandler,
 	"file":      newFileHandler,
 	"setCookie": newSetCookieHandler,
+	"getCookie": newGetCookieHandler,
 }
 
 type statusHandlerOptions struct {
@@ -122,5 +123,41 @@ func newSetCookieHandler(config handlerConfig, domain domainTree) (http.Handler,
 			writer.Header().Add("Content-Type", "text/html")
 		}
 		writer.Write([]byte(htmlBody))
+	}), nil
+}
+
+type getCookiePostPayload struct {
+	CookieName string
+}
+
+// newGetCookieHandler constructs a handler for POSTs that specify a Cookie: to return by name (or 404 if that cookie wasn't sent)
+func newGetCookieHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
+	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
+			writer.WriteHeader(http.StatusBadRequest)
+			writer.Write([]byte("POST JSON"))
+			return
+		}
+
+		decoder := json.NewDecoder(req.Body)
+		var payload getCookiePostPayload
+		err := decoder.Decode(&payload)
+		if err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			writer.Write([]byte("POST _good_ JSON"))
+			return
+		}
+
+		cookie, err := req.Cookie(payload.CookieName)
+		if err == http.ErrNoCookie {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		} else if err != nil {
+			writer.WriteHeader(http.StatusInternalServerError)
+			writer.Write([]byte(err.Error()))
+			return
+		}
+
+		writer.Write([]byte(cookie.Value))
 	}), nil
 }
