@@ -3,9 +3,15 @@ package miniweb
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	"log"
 	"net/http"
 	"os"
 
+	"github.com/hashicorp/go-uuid"
 	"github.com/pelletier/go-toml"
 	"golang.org/x/net/html"
 )
@@ -13,10 +19,11 @@ import (
 type handlerFactoryFunc func(handlerConfig, domainTree) (http.Handler, error)
 
 var handlerFactoryRegistry = map[string]handlerFactoryFunc{
-	"status":    newStatusHandler,
-	"file":      newFileHandler,
-	"setCookie": newSetCookieHandler,
-	"getCookie": newGetCookieHandler,
+	"status":     newStatusHandler,
+	"file":       newFileHandler,
+	"setCookie":  newSetCookieHandler,
+	"getCookie":  newGetCookieHandler,
+	"toyTracker": newToyTrackerHandler,
 }
 
 type statusHandlerOptions struct {
@@ -159,5 +166,48 @@ func newGetCookieHandler(config handlerConfig, domain domainTree) (http.Handler,
 		}
 
 		writer.Write([]byte(cookie.Value))
+	}), nil
+}
+
+// newToyTrackerHandler constructs a handler for GETs that shows an image indicating tracked/untracked
+func newToyTrackerHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
+	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var identifier string
+		var shade color.Color
+		cookie, err := req.Cookie("toyTrackerID")
+		if err == http.ErrNoCookie {
+			identifier, err = uuid.GenerateUUID()
+			shade = color.RGBA{R: 255, G: 0, B: 0, A: 255}
+		} else if err == nil {
+			identifier = cookie.Value
+			shade = color.RGBA{R: 0, G: 255, B: 0, A: 255}
+		}
+		if err != nil {
+			writer.WriteHeader(http.StatusInternalServerError)
+			writer.Write([]byte(err.Error()))
+			return
+		}
+
+		display := image.NewRGBA(image.Rect(0, 0, 64, 64))
+		draw.Draw(display, display.Bounds(), image.NewUniform(shade), image.Pt(0, 0), draw.Over)
+
+		http.SetCookie(writer, &http.Cookie{
+			Name:     "toyTrackerID",
+			Value:    identifier,
+			HttpOnly: false,
+			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
+		})
+
+		writer.Header().Set("Content-Type", "image/png")
+		err = png.Encode(writer, display)
+		if err != nil {
+			log.Printf("toyTracker: error encoding display image: %v\n", err)
+		}
 	}), nil
 }

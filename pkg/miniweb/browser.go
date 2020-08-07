@@ -11,9 +11,10 @@ var ErrUnknownBrowserKind = fmt.Errorf("supported browser kinds are: 'chromium'"
 
 // Browser is a launch structure for viewing proxied miniweb resource in a Web browser
 type Browser struct {
-	kind      string // e.g., "chromium", "firefox"
-	exe       string // path to actual executable
-	socksPort int    // SOCKS5 port on localhost to use for traffic proxying
+	kind      string   // e.g., "chromium", "firefox"
+	exe       string   // path to actual executable
+	socksPort int      // SOCKS5 port on localhost to use for traffic proxying
+	args      []string // extra CLI arguments before the URL
 }
 
 // NewBrowser constructs a Browser for a given kind/exe path and with a given SOCKS5 port on localhost
@@ -24,6 +25,11 @@ func NewBrowser(kind, exe string, socksPort int) Browser {
 		exe:       exe,
 		socksPort: socksPort,
 	}
+}
+
+// Arg appends a CLI argument to the list of extra arguments passed after the proxy settings and before the URL
+func (b *Browser) Arg(arg ...string) {
+	b.args = append(b.args, arg...)
 }
 
 // Launch launches the given browser with the given SOCKS5 proxy, opening the given URL as the initial document
@@ -45,7 +51,7 @@ func (b Browser) launchChromium(url string) error {
 			`--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost`,
 		)
 	}
-
+	args = append(args, b.args...)
 	args = append(args, url)
 
 	cmd := exec.Command(b.exe, args...)
