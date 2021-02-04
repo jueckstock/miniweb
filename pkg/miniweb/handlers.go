@@ -202,6 +202,7 @@ func newToyTrackerHandler(config handlerConfig, domain domainTree) (http.Handler
 			HttpOnly: false,
 			Secure:   true,
 			SameSite: http.SameSiteNoneMode,
+			MaxAge:   24 * 3600 * 365,
 		})
 
 		writer.Header().Set("Content-Type", "image/png")
