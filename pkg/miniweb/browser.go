@@ -57,5 +57,5 @@ func (b Browser) launchChromium(url string) error {
 	cmd := exec.Command(b.exe, args...)
 	log.Println(cmd)
 
-	return cmd.Start()
+	return cmd.Run()
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	lib "github.com/jueckstock/miniweb/pkg/miniweb"
@@ -43,6 +44,7 @@ func Main(args []string) {
 			if err != nil {
 				panic(err)
 			}
+			os.Exit(0)
 		}()
 	}
 
