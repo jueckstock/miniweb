@@ -1,14 +1,18 @@
 package miniweb
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/hashicorp/go-uuid"
@@ -16,7 +20,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-type handlerFactoryFunc func(handlerConfig, domainTree) (http.Handler, error)
+type handlerFactoryFunc func(*handlerConfig, domainTree) error
 
 var handlerFactoryRegistry = map[string]handlerFactoryFunc{
 	"status":     newStatusHandler,
@@ -24,6 +28,7 @@ var handlerFactoryRegistry = map[string]handlerFactoryFunc{
 	"setCookie":  newSetCookieHandler,
 	"getCookie":  newGetCookieHandler,
 	"toyTracker": newToyTrackerHandler,
+	"proxy":      newProxyHandler,
 }
 
 type statusHandlerOptions struct {
@@ -32,16 +37,16 @@ type statusHandlerOptions struct {
 }
 
 // newStatusHandler constructs  the basic testing handler, for emitting fixed strings
-func newStatusHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
+func newStatusHandler(config *handlerConfig, domain domainTree) error {
 	optionTree, err := toml.TreeFromMap(config.Options)
 	if err != nil {
-		return nil, fmt.Errorf("newStatusHandler(...): %w", err)
+		return fmt.Errorf("newStatusHandler(...): %w", err)
 	}
 
 	var options statusHandlerOptions
 	err = optionTree.Unmarshal(&options)
 	if err != nil {
-		return nil, fmt.Errorf("newStatusHandler(...): %w", err)
+		return fmt.Errorf("newStatusHandler(...): %w", err)
 	}
 
 	if options.Status == 0 {
@@ -51,12 +56,13 @@ func newStatusHandler(config handlerConfig, domain domainTree) (http.Handler, er
 		options.Text = http.StatusText(options.Status)
 	}
 
-	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		//writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(options.Text)))
 		//writer.Header().Set("Content-Type", "text/plain")
 		writer.WriteHeader(options.Status)
 		writer.Write([]byte(options.Text))
-	}), nil
+	})
+	return nil
 }
 
 type fileHandlerOptions struct {
@@ -64,23 +70,23 @@ type fileHandlerOptions struct {
 }
 
 // newFileHandler constructs a handler for basic HTTP file serving (using domain's openFile semantics)
-func newFileHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
+func newFileHandler(config *handlerConfig, domain domainTree) error {
 	optionTree, err := toml.TreeFromMap(config.Options)
 	if err != nil {
-		return nil, fmt.Errorf("newFileHandler(...): %w", err)
+		return fmt.Errorf("newFileHandler(...): %w", err)
 	}
 
 	var options fileHandlerOptions
 	err = optionTree.Unmarshal(&options)
 	if err != nil {
-		return nil, fmt.Errorf("newFileHandler(...): %w", err)
+		return fmt.Errorf("newFileHandler(...): %w", err)
 	}
 
 	if options.Index == "" {
 		options.Index = "index.html"
 	}
 
-	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		file, stat, err := domain.openFile(req.URL.Path, options.Index)
 		if file != nil {
 			defer (*file).Close()
@@ -94,7 +100,8 @@ func newFileHandler(config handlerConfig, domain domainTree) (http.Handler, erro
 		} else {
 			http.ServeContent(writer, req, stat.Name(), stat.ModTime(), *file)
 		}
-	}), nil
+	})
+	return nil
 }
 
 type setCookiePostPayload struct {
@@ -103,8 +110,8 @@ type setCookiePostPayload struct {
 }
 
 // newSetCookieHandler constructs a handler for POSTs that take a JSON-specified list of cookies to set and meta-refresh-redirect to a specified URL
-func newSetCookieHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
-	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+func newSetCookieHandler(config *handlerConfig, domain domainTree) error {
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
 			writer.WriteHeader(http.StatusBadRequest)
 			writer.Write([]byte("POST JSON"))
@@ -130,7 +137,8 @@ func newSetCookieHandler(config handlerConfig, domain domainTree) (http.Handler,
 			writer.Header().Add("Content-Type", "text/html")
 		}
 		writer.Write([]byte(htmlBody))
-	}), nil
+	})
+	return nil
 }
 
 type getCookiePostPayload struct {
@@ -138,8 +146,8 @@ type getCookiePostPayload struct {
 }
 
 // newGetCookieHandler constructs a handler for POSTs that specify a Cookie: to return by name (or 404 if that cookie wasn't sent)
-func newGetCookieHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
-	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+func newGetCookieHandler(config *handlerConfig, domain domainTree) error {
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
 			writer.WriteHeader(http.StatusBadRequest)
 			writer.Write([]byte("POST JSON"))
@@ -166,12 +174,13 @@ func newGetCookieHandler(config handlerConfig, domain domainTree) (http.Handler,
 		}
 
 		writer.Write([]byte(cookie.Value))
-	}), nil
+	})
+	return nil
 }
 
 // newToyTrackerHandler constructs a handler for GETs that shows an image indicating tracked/untracked
-func newToyTrackerHandler(config handlerConfig, domain domainTree) (http.Handler, error) {
-	return http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+func newToyTrackerHandler(config *handlerConfig, domain domainTree) error {
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			writer.WriteHeader(http.StatusBadRequest)
 			return
@@ -210,5 +219,116 @@ func newToyTrackerHandler(config handlerConfig, domain domainTree) (http.Handler
 		if err != nil {
 			log.Printf("toyTracker: error encoding display image: %v\n", err)
 		}
-	}), nil
+	})
+	return nil
 }
+
+type proxyConfigFormat struct {
+	ServerURL string // ServerURL gives the host (name/IP) and port number (explicit or implied by scheme) handling HTTP proxy requests
+}
+
+// newProxyHandler constructs an HTTP-request-proxying handler hitting a specified back-end HTTP server
+func newProxyHandler(config *handlerConfig, domain domainTree) error {
+	ttree, err := toml.TreeFromMap(config.Options)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	var pcf proxyConfigFormat
+	if err = ttree.Unmarshal(&pcf); err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	su, err := url.Parse(pcf.ServerURL)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	host, port, err := net.SplitHostPort(su.Host)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	} else if port == "" {
+		port = su.Scheme
+	}
+	proxyAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%s", host, port))
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		echoReq := req.Clone(context.Background())
+		echoReq.URL.Host = proxyAddr.String()
+		echoReq.URL.Scheme = "http"
+		echoReq.RequestURI = ""
+		echoResp, err := http.DefaultClient.Do(echoReq)
+		if err != nil {
+			writer.WriteHeader(http.StatusBadGateway)
+			writer.Write([]byte(err.Error()))
+			return
+		}
+
+		for key, values := range echoResp.Header {
+			for _, value := range values {
+				writer.Header().Add(key, value)
+			}
+		}
+		writer.WriteHeader(echoResp.StatusCode)
+		_, err = io.Copy(writer, echoResp.Body)
+		if err != nil {
+			log.Printf("error writing proxied request/response back to client: %s", err.Error())
+		}
+
+	})
+	return nil
+}
+
+/* (this passthru proxy implementation is a nice idea but loses the TLS termination we need...)
+type proxyRequestRewriter struct {
+	IP   net.IP // IP address of HTTP server handling proxy requests
+	Port int    // TCP port of HTTP server handling proxy requests
+}
+
+// Rewrite routes the SOCKSified connection request to the proxy HTTP server host/port
+func (pr *proxyRequestRewriter) Rewrite(ctx context.Context, request *socks.Request) (context.Context, *socks.AddrSpec) {
+	return ctx, &socks.AddrSpec{
+		FQDN: request.DestAddr.FQDN,
+		IP:   pr.IP,
+		Port: pr.Port,
+	}
+}
+
+// newProxyHandler constructs a socks-rewriting level handler that forwards an incoming HTTP request to another server
+func newProxyHandler(config *handlerConfig, domain domainTree) error {
+	ttree, err := toml.TreeFromMap(config.Options)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	var pcf proxyConfigFormat
+	if err = ttree.Unmarshal(&pcf); err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	su, err := url.Parse(pcf.ServerURL)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	host, port, err := net.SplitHostPort(su.Host)
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	} else if port == "" {
+		port = su.Scheme
+	}
+	proxyAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%s", host, port))
+	if err != nil {
+		return fmt.Errorf("newProxyhandler(...): %w", err)
+	}
+
+	config.socksRewriter = &proxyRequestRewriter{
+		IP:   proxyAddr.IP,
+		Port: proxyAddr.Port,
+	}
+	return nil
+}
+*/

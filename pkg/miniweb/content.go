@@ -8,13 +8,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/armon/go-socks5"
 	toml "github.com/pelletier/go-toml"
 )
 
 type handlerConfig struct {
-	Name    string                 // name of handler to use (from global map of handler types)
-	Options map[string]interface{} // arbitrary options for a given handler
-	handler http.Handler           // bound ServeHTTP handler function (computed from config)
+	Name          string                 // name of handler to use (from global map of handler types)
+	Options       map[string]interface{} // arbitrary options for a given handler
+	httpHandler   http.Handler           // how to handle HTTP requests (if the SOCKS level sent it to our internal HTTP requests)
+	socksRewriter socks5.AddressRewriter // alternate address rewriting logic (at the SOCKS level) for things like reverse proxies
 }
 
 type domainConfig struct {
@@ -109,24 +111,23 @@ func (t domainTree) resolveHandler(config *handlerConfig) error {
 		return fmt.Errorf("resolveHandler(...): no such handler '%s'", config.Name)
 	}
 
-	handler, err := factoryFunc(*config, t)
+	err := factoryFunc(config, t)
 	if err != nil {
 		return fmt.Errorf("resolveHandler(...): %w", err)
 	}
-	config.handler = handler
 
 	return nil
 }
 
-// handler gets the HTTP handler for a given path (or the default handler)
-func (t domainTree) handler(req *http.Request) http.Handler {
+// httpHandler gets the HTTP httpHandler for a given path (or the default)
+func (t domainTree) httpHandler(req *http.Request) http.Handler {
 	reqPath := req.URL.Path
 	hc, ok := t.config.Handlers[reqPath]
 	if ok {
-		return hc.handler
+		return hc.httpHandler
 	}
 
-	return t.config.DefaultHandler.handler
+	return t.config.DefaultHandler.httpHandler
 }
 
 // contentTree maps DNS names to domain trees

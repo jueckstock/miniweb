@@ -36,18 +36,25 @@ func (ws *Server) Resolve(ctx context.Context, name string) (context.Context, ne
 	return ctx, ws.host, nil
 }
 
-// Rewrite an HTTP[S] request coming through SOCKS to target our local HTTP[S] server
+// Rewrite an HTTP[S] request coming through SOCKS to target our local HTTP[S] server (or to a custom server, if a socks-rewriter is configured)
 func (ws *Server) Rewrite(ctx context.Context, request *socks.Request) (context.Context, *socks.AddrSpec) {
-	newDest := &socks.AddrSpec{
-		FQDN: request.DestAddr.FQDN,
-		IP:   request.DestAddr.IP,
-	}
-	if request.DestAddr.Port == 443 {
-		newDest.Port = ws.Config.HTTPSPort
+	tree := ws.tree.domain(request.DestAddr.FQDN)
+	if (tree != nil) && (tree.config.DefaultHandler.socksRewriter != nil) {
+		// custom rewrite rule from the domain config
+		return tree.config.DefaultHandler.socksRewriter.Rewrite(ctx, request)
 	} else {
-		newDest.Port = ws.Config.HTTPPort
+		// standard rewrite (handle with our special internal HTTP server and configured HTTP handler rules)
+		newDest := &socks.AddrSpec{
+			FQDN: request.DestAddr.FQDN,
+			IP:   request.DestAddr.IP,
+		}
+		if request.DestAddr.Port == 443 {
+			newDest.Port = ws.Config.HTTPSPort
+		} else {
+			newDest.Port = ws.Config.HTTPPort
+		}
+		return ctx, newDest
 	}
-	return ctx, newDest
 }
 
 // ServeHTTP responses from the miniweb file tree and/or configuration settings
@@ -57,7 +64,7 @@ func (ws *Server) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
 		log.Panicf("how did we accept a request for NXDOMAIN '%s'??", req.Host)
 	}
 
-	handler := domain.handler(req)
+	handler := domain.httpHandler(req)
 	if handler == nil {
 		log.Panicf("how are we missing a handler for '%s'??", req.URL.Path)
 	}
