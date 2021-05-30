@@ -20,7 +20,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-type handlerFactoryFunc func(*handlerConfig, domainTree) error
+type handlerFactoryFunc func(*handlerConfig, miniDomain) error
 
 var handlerFactoryRegistry = map[string]handlerFactoryFunc{
 	"status":     newStatusHandler,
@@ -37,7 +37,7 @@ type statusHandlerOptions struct {
 }
 
 // newStatusHandler constructs  the basic testing handler, for emitting fixed strings
-func newStatusHandler(config *handlerConfig, domain domainTree) error {
+func newStatusHandler(config *handlerConfig, domain miniDomain) error {
 	optionTree, err := toml.TreeFromMap(config.Options)
 	if err != nil {
 		return fmt.Errorf("newStatusHandler(...): %w", err)
@@ -70,7 +70,7 @@ type fileHandlerOptions struct {
 }
 
 // newFileHandler constructs a handler for basic HTTP file serving (using domain's openFile semantics)
-func newFileHandler(config *handlerConfig, domain domainTree) error {
+func newFileHandler(config *handlerConfig, domain miniDomain) error {
 	optionTree, err := toml.TreeFromMap(config.Options)
 	if err != nil {
 		return fmt.Errorf("newFileHandler(...): %w", err)
@@ -110,7 +110,7 @@ type setCookiePostPayload struct {
 }
 
 // newSetCookieHandler constructs a handler for POSTs that take a JSON-specified list of cookies to set and meta-refresh-redirect to a specified URL
-func newSetCookieHandler(config *handlerConfig, domain domainTree) error {
+func newSetCookieHandler(config *handlerConfig, domain miniDomain) error {
 	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
 			writer.WriteHeader(http.StatusBadRequest)
@@ -146,7 +146,7 @@ type getCookiePostPayload struct {
 }
 
 // newGetCookieHandler constructs a handler for POSTs that specify a Cookie: to return by name (or 404 if that cookie wasn't sent)
-func newGetCookieHandler(config *handlerConfig, domain domainTree) error {
+func newGetCookieHandler(config *handlerConfig, domain miniDomain) error {
 	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost || req.Header.Get("Content-Type") != "application/json" {
 			writer.WriteHeader(http.StatusBadRequest)
@@ -179,7 +179,7 @@ func newGetCookieHandler(config *handlerConfig, domain domainTree) error {
 }
 
 // newToyTrackerHandler constructs a handler for GETs that shows an image indicating tracked/untracked
-func newToyTrackerHandler(config *handlerConfig, domain domainTree) error {
+func newToyTrackerHandler(config *handlerConfig, domain miniDomain) error {
 	config.httpHandler = http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			writer.WriteHeader(http.StatusBadRequest)
@@ -228,7 +228,7 @@ type proxyConfigFormat struct {
 }
 
 // newProxyHandler constructs an HTTP-request-proxying handler hitting a specified back-end HTTP server
-func newProxyHandler(config *handlerConfig, domain domainTree) error {
+func newProxyHandler(config *handlerConfig, domain miniDomain) error {
 	ttree, err := toml.TreeFromMap(config.Options)
 	if err != nil {
 		return fmt.Errorf("newProxyhandler(...): %w", err)

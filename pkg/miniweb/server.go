@@ -19,8 +19,10 @@ type Server struct {
 	Config ServerConfig // Config is the initial configuration (ports, paths) used to initialize the server
 
 	// Core internal state
-	host net.IP      // host is the IP address on which we are listening for HTTP[S] requests (used to resolve DNS requests via SOCKS)
-	tree contentTree // tree is the master tree of domains/doc-roots that we are serving
+	httpPort  int      // httpPort is the TCP port (on localhost, exclusively) from which we will serve redirected HTTP requests
+	httpsPort int      // httpsPort is like HTTPPort but for redirected TLS connections
+	host      net.IP   // host is the IP address on which we are listening for HTTP[S] requests (used to resolve DNS requests via SOCKS)
+	tree      miniRoot // tree is the master tree of minidomains that we are serving
 
 	// HTTPS/TLS supporting state
 	issuer    *minica.Issuer              // issuer is our internal toy CA for signing TLS certs (using a self-generated toy CA cert/key)
@@ -49,9 +51,9 @@ func (ws *Server) Rewrite(ctx context.Context, request *socks.Request) (context.
 			IP:   request.DestAddr.IP,
 		}
 		if request.DestAddr.Port == 443 {
-			newDest.Port = ws.Config.HTTPSPort
+			newDest.Port = ws.httpsPort
 		} else {
-			newDest.Port = ws.Config.HTTPPort
+			newDest.Port = ws.httpPort
 		}
 		return ctx, newDest
 	}
@@ -89,15 +91,14 @@ func (ws *Server) GetCert(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
 
 // ServerConfig defines the operating parameters of a miniweb server: TCP ports to bind and filesystem root
 type ServerConfig struct {
-	HTTPPort   int    // HTTPPort is the TCP port (on localhost, exclusively) from which we will serve redirected HTTP requests
-	HTTPSPort  int    // HTTPSPort is like HTTPPort but for redirected TLS connections
 	SOCKS5Addr string // SOCKS5Port is the TCP endpoint at which we will accept SOCKS5 requests to resolve/redirect DNS names and HTTP[S] requests
-	DataRoot   string // Full path to miniweb data store (top level directory names == DNS names, contents == HTTP[S] document root tree)
+	CARoot     string // CARoot is a directory in which the miniCA certs/keys are placed/found
+	MicroRoot  string // MicroRoot is the served data store (top level directory names == DNS names, contents == config and/or static content)
 }
 
 // ListenAndServe creates/runs a miniweb server until an error interrupts it
 func ListenAndServe(config ServerConfig) error {
-	tree, err := newContentTree(config.DataRoot)
+	tree, err := newContentTree(config.MicroRoot)
 	if err != nil {
 		return fmt.Errorf("ListenAndServe(...): %w", err)
 	}
@@ -117,37 +118,55 @@ func ListenAndServe(config ServerConfig) error {
 		return fmt.Errorf("socks.New(...) error: %w", err)
 	}
 
+	// find an available port to listen on for HTTP, kick off a server
+	httpListener, err := net.Listen("tcp4", "localhost:0")
+	if err != nil {
+		return fmt.Errorf("miniweb: creating ephemeral HTTP listener: %w", err)
+	}
+	httpEndpoint, err := net.ResolveTCPAddr(httpListener.Addr().Network(), httpListener.Addr().String())
+	if err != nil {
+		return fmt.Errorf("miniweb: identifying ephemeral HTTP endpoint: %w", err)
+	}
+	ws.httpPort = httpEndpoint.Port
 	go func() {
-		log.Printf("HTTP: listening on %s:%d, serving from %s\n", ws.host, config.HTTPPort, config.DataRoot)
-		err = http.ListenAndServe(fmt.Sprintf("%s:%d", ws.host, config.HTTPPort), ws)
+		log.Printf("HTTP: listening on %s:%d, serving from %s\n", ws.host, ws.httpPort, config.MicroRoot)
+		err = http.Serve(httpListener, ws)
 		if err != nil {
 			log.Panicf("error listening/serving HTTP traffic: %v", err)
 		}
 	}()
-	if config.HTTPSPort > 0 {
-		keyFileName := filepath.Join(config.DataRoot, "minica-key.pem")
-		certFileName := filepath.Join(config.DataRoot, "minica.pem")
-		ws.issuer, err = minica.GetIssuer(keyFileName, certFileName)
-		if err != nil {
-			log.Panicf("error initializing miniCA (required for HTTPS server support): %v", err)
-		}
-		go func() {
-			log.Printf("HTTPS: listening on %s:%d, serving from %s\n", ws.host, config.HTTPSPort, config.DataRoot)
-			srv := &http.Server{
-				Addr:    fmt.Sprintf("%s:%d", ws.host, config.HTTPSPort),
-				Handler: ws,
-				TLSConfig: &tls.Config{
-					GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-						return ws.GetCert(info)
-					},
-				},
-			}
-			err = srv.ListenAndServeTLS("", "")
-			if err != nil {
-				log.Panicf("error serving HTTPS traffic: %v", err)
-			}
-		}()
+
+	// same for HTTPS
+	httpsListener, err := net.Listen("tcp4", "localhost:0")
+	if err != nil {
+		return fmt.Errorf("miniweb: creating ephemeral HTTPS listener: %w", err)
 	}
+	httpsEndpoint, err := net.ResolveTCPAddr(httpsListener.Addr().Network(), httpsListener.Addr().String())
+	if err != nil {
+		return fmt.Errorf("miniweb: identifying ephemeral HTTPS endpoint: %w", err)
+	}
+	ws.httpsPort = httpsEndpoint.Port
+	keyFileName := filepath.Join(config.MicroRoot, "minica-key.pem") // TODO: switch to using config.CARoot for certs/keys
+	certFileName := filepath.Join(config.MicroRoot, "minica.pem")
+	ws.issuer, err = minica.GetIssuer(keyFileName, certFileName)
+	if err != nil {
+		log.Panicf("error initializing miniCA (required for HTTPS server support): %v", err)
+	}
+	go func() {
+		log.Printf("HTTPS: listening on %s:%d, serving from %s\n", ws.host, ws.httpsPort, config.MicroRoot)
+		srv := &http.Server{
+			Handler: ws,
+			TLSConfig: &tls.Config{
+				GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return ws.GetCert(info)
+				},
+			},
+		}
+		err = srv.ServeTLS(httpsListener, "", "") // empty cert/key filenames, because we have srv.TLSConfig.GetCertificate in there
+		if err != nil {
+			log.Panicf("error serving HTTPS traffic: %v", err)
+		}
+	}()
 
 	log.Printf("SOCKS: listening on %s\n", config.SOCKS5Addr)
 	err = socksServer.ListenAndServe("tcp", config.SOCKS5Addr)

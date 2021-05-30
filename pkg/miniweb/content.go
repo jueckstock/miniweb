@@ -24,13 +24,13 @@ type domainConfig struct {
 	Handlers       map[string]*handlerConfig // special handler configs for specific filenames
 }
 
-type domainTree struct {
+type miniDomain struct {
 	config domainConfig    // this domain's configuration data (from TOML)
 	root   http.FileSystem // the root node of the file tree backing this domain tree
 }
 
-// openFile tries to open a non-directly file given by a path under a domain tree (using the IndexFile if landing on a sub-directory)
-func (t domainTree) openFile(filePath string, indexFile string) (*http.File, os.FileInfo, error) {
+// openFile tries to open a non-directly file given by a path under a minidomain (using the IndexFile if landing on a sub-directory)
+func (t miniDomain) openFile(filePath string, indexFile string) (*http.File, os.FileInfo, error) {
 	if strings.HasSuffix(filePath, "/") {
 		filePath = filePath + indexFile
 	}
@@ -53,9 +53,9 @@ func (t domainTree) openFile(filePath string, indexFile string) (*http.File, os.
 	return &file, stat, nil
 }
 
-// newDomainTree parses a directory's config file (if any) and constructs a domain tree
-func newDomainTree(rootPath string) (*domainTree, error) {
-	tree := &domainTree{
+// newDomainTree parses a directory's config file (if any) and constructs a minidomain
+func newDomainTree(rootPath string) (*miniDomain, error) {
+	tree := &miniDomain{
 		root: http.Dir(rootPath),
 	}
 
@@ -88,7 +88,7 @@ func newDomainTree(rootPath string) (*domainTree, error) {
 	return tree, nil
 }
 
-func (t *domainTree) resolveAllHandlers() error {
+func (t *miniDomain) resolveAllHandlers() error {
 	err := t.resolveHandler(&t.config.DefaultHandler)
 	if err == nil {
 		for _, hc := range t.config.Handlers {
@@ -105,7 +105,7 @@ func (t *domainTree) resolveAllHandlers() error {
 }
 
 // resolveHandler looks up a handler type by name and binds a ServeHTTP handler to its configuration
-func (t domainTree) resolveHandler(config *handlerConfig) error {
+func (t miniDomain) resolveHandler(config *handlerConfig) error {
 	factoryFunc, ok := handlerFactoryRegistry[config.Name]
 	if !ok {
 		return fmt.Errorf("resolveHandler(...): no such handler '%s'", config.Name)
@@ -120,7 +120,7 @@ func (t domainTree) resolveHandler(config *handlerConfig) error {
 }
 
 // httpHandler gets the HTTP httpHandler for a given path (or the default)
-func (t domainTree) httpHandler(req *http.Request) http.Handler {
+func (t miniDomain) httpHandler(req *http.Request) http.Handler {
 	reqPath := req.URL.Path
 	hc, ok := t.config.Handlers[reqPath]
 	if ok {
@@ -130,12 +130,12 @@ func (t domainTree) httpHandler(req *http.Request) http.Handler {
 	return t.config.DefaultHandler.httpHandler
 }
 
-// contentTree maps DNS names to domain trees
-type contentTree map[string]*domainTree
+// miniRoot maps DNS names to miniDomain configs
+type miniRoot map[string]*miniDomain
 
 // installBuiltins adds some magic domains/handlers to the content tree
-func (t contentTree) installBuiltins() error {
-	domain := &domainTree{
+func (t miniRoot) installBuiltins() error {
+	domain := &miniDomain{
 		config: domainConfig{
 			DefaultHandler: handlerConfig{
 				Name: "status",
@@ -165,8 +165,8 @@ func (t contentTree) installBuiltins() error {
 }
 
 // newContentTree iterates over the root directory and creates a domain tree for each sub-directory (if possible)
-func newContentTree(rootPath string) (contentTree, error) {
-	tree := make(contentTree)
+func newContentTree(rootPath string) (miniRoot, error) {
+	tree := make(miniRoot)
 	err := tree.installBuiltins()
 	if err != nil {
 		return nil, fmt.Errorf("newContentTree('%s'): %w", rootPath, err)
@@ -197,6 +197,6 @@ func newContentTree(rootPath string) (contentTree, error) {
 }
 
 // domain looks up a domain tree by DNS name (nil if no such domain found)
-func (t contentTree) domain(name string) *domainTree {
+func (t miniRoot) domain(name string) *miniDomain {
 	return t[name]
 }
